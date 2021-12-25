@@ -1,66 +1,151 @@
 import '../styles/styles.css'
 
-import Web3 from "web3/dist/web3.min";
 import { ChainId } from "@uniswap/sdk";
 
-const serverUrl = "https://aenwdi8fge3h.usemoralis.com:2053/server"; //Server url from moralis.io
-const appId = "4I2LYb4bc9PnEC8iWPBoVxAlUxhI45KTwWxVRXyM"; 
+const serverUrl = ""; //Server url from moralis.io
+const appId = ""; 
+let currentTrade = {};
+let currentSelectSide;
+let tokens;
 
 
-window.onload = async () => {
-    // Init Web3 connected to ETH network
-    if (window.ethereum) {
-      window.web3 = new Web3(window.ethereum);
-      const chainId = await window.web3.eth.getChainId()
-      console.log(chainId)
+async function init() { 
+    await Moralis.start({ serverUrl, appId });
+    const web3 = await Moralis.enableWeb3();
+    console.log(await web3.eth.getChainId())
+    await listAvailableTokens();
+    const currentUser = Moralis.User.current();
 
-      if (chainId != 56) {
-        document.getElementById("navbar-error-text").hidden = false;
-          alert("Wrong network!");
-      } else {
-        document.getElementById("swap_button").disabled = false;
-      }
-    } else {
-      alert("No ETH brower extension detected.");
+    if (currentUser) {
+      document.getElementById("swap_button").disabled = false;
     }
-    // Load in Localstore key
-    window.userAddress = window.localStorage.getItem("userAddress");
-    console.log(window.userAddress)
-    // showAddress();
-  };
+}
 
-// Login with Web3 via Metamasks window.ethereum library
-async function loginWithEth() {
-if (window.web3) {
+async function listAvailableTokens() {
+    const result = await Moralis.Plugins.oneInch.getSupportedTokens({
+      chain: "bsc", // The blockchain you want to use (eth/bsc/polygon)
+    });
+    tokens = result.tokens;
+    let parent = document.getElementById("token_list");
+    for (const address in tokens) {
+      let token = tokens[address];
+      let div = document.createElement("div");
+      div.setAttribute("data-address", address);
+      div.className = "token_row";
+      let html = `
+          <img class="token_list_img" src="${token.logoURI}">
+          <span class="token_list_text">${token.symbol}</span>
+          `;
+      div.innerHTML = html;
+      div.onclick = () => {
+        selectToken(address);
+      };
+      parent.appendChild(div);
+    }
+}
+
+function selectToken(address) {
+    closeModal();
+    console.log(tokens);
+    currentTrade[currentSelectSide] = tokens[address];
+    console.log(currentTrade);
+    renderInterface();
+    getQuote();
+}
+
+function renderInterface() {
+    if (currentTrade.from) {
+      document.getElementById("from_token_img").src = currentTrade.from.logoURI;
+      document.getElementById("from_token_text").innerHTML = currentTrade.from.symbol;
+    }
+    if (currentTrade.to) {
+      document.getElementById("to_token_img").src = currentTrade.to.logoURI;
+      document.getElementById("to_token_text").innerHTML = currentTrade.to.symbol;
+    }
+}
+
+async function login() {
+
     try {
-    // We use this since ethereum.enable() is deprecated. This method is not
-    // available in Web3JS - so we call it directly from metamasks' library
-    const selectedAccount = await window.ethereum
-        .request({
-        method: "eth_requestAccounts",
-        })
-        .then((accounts) => accounts[0])
-        .catch(() => {
-            throw Error("No account selected!");
-        });
+        let currentUser = await Moralis.User.current();
+        if (!currentUser) {
+            currentUser = await Moralis.authenticate();
+        }
+        const user = await Moralis.authenticate()
         document.getElementById("swap_button").disabled = false;
-        console.log(window.web3.eth.ChainId)
-    window.userAddress = selectedAccount;
-    window.localStorage.setItem("userAddress", selectedAccount);
-    console.log(selectedAccount)
-    // showAddress();
     } catch (error) {
-        console.error(error);
+        console.log(error);
     }
-} else {
-    alert("No ETH brower extension detected.");
-}
 }
 
-function logout() {
-    window.userAddress = null;
-    window.localStorage.removeItem("userAddress");
-    showAddress();
-  }
+function openModal(side) {
+    currentSelectSide = side;
+    document.getElementById("token_modal").style.display = "block";
+}
 
-document.getElementById("login_button").onclick = loginWithEth;
+function closeModal() {
+    document.getElementById("token_modal").style.display = "none";
+}
+
+async function getQuote() {
+    if (!currentTrade.from || !currentTrade.to || !document.getElementById("from_amount").value) return;
+  
+    let amount = Number(document.getElementById("from_amount").value * 10 ** currentTrade.from.decimals);
+  
+    const quote = await Moralis.Plugins.oneInch.quote({
+      chain: "bsc", // The blockchain you want to use (eth/bsc/polygon)
+      fromTokenAddress: currentTrade.from.address, // The token you want to swap
+      toTokenAddress: currentTrade.to.address, // The token you want to receive
+      amount: amount,
+    });
+    console.log(quote);
+    document.getElementById("gas_estimate").innerHTML = quote.estimatedGas;
+    document.getElementById("to_amount").value = quote.toTokenAmount / 10 ** quote.toToken.decimals;
+}
+
+async function trySwap() {
+    let address = Moralis.User.current().get("ethAddress");
+    let amount = Number(document.getElementById("from_amount").value * 10 ** currentTrade.from.decimals);
+    if (currentTrade.from.symbol !== "BSC") {
+      const allowance = await Moralis.Plugins.oneInch.hasAllowance({
+        chain: "bsc", // The blockchain you want to use (eth/bsc/polygon)
+        fromTokenAddress: currentTrade.from.address, // The token you want to swap
+        fromAddress: address, // Your wallet address
+        amount: amount,
+      });
+      console.log(allowance);
+      if (!allowance) {
+        await Moralis.Plugins.oneInch.approve({
+          chain: "bsc", // The blockchain you want to use (eth/bsc/polygon)
+          tokenAddress: currentTrade.from.address, // The token you want to swap
+          fromAddress: address, // Your wallet address
+        });
+      }
+    }
+    try {
+      let receipt = await doSwap(address, amount);
+      alert("Swap Complete");
+    } catch (error) {
+      console.log(error);
+    }
+}
+
+function doSwap(userAddress, amount) {
+    return Moralis.Plugins.oneInch.swap({
+      chain: "bsc", // The blockchain you want to use (eth/bsc/polygon)
+      fromTokenAddress: currentTrade.from.address, // The token you want to swap
+      toTokenAddress: currentTrade.to.address, // The token you want to receive
+      amount: amount,
+      fromAddress: userAddress, // Your wallet address
+      slippage: 1,
+    });
+}
+
+init();
+
+document.getElementById("modal_close").onclick = closeModal;
+document.getElementById("from_token_select").onclick = () => { openModal("from"); };
+document.getElementById("to_token_select").onclick = () => { openModal("to"); };
+document.getElementById("login_button").onclick = login;
+document.getElementById("from_amount").onblur = getQuote;
+document.getElementById("swap_button").onclick = trySwap;
